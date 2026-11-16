@@ -1,0 +1,294 @@
+[project]
+name = "project"
+version = "0.1.0"
+description = "Schrodinger Bridge Language Modeling"
+authors = [
+    { name = "afrenkai", email = "frenkartemcool1@gmail.com" }
+]
+requires-python = ">=3.12"
+dependencies = [
+    "accelerate>=1.15.0",
+    "av==19.0.1",
+    "beautifulsoup4",
+    "black",
+    "click",
+    "constructs",
+    "cryptography",
+    "datasets",
+    "diffusers",
+    "docx",
+    "evaluate",
+    "fastapi",
+    "imagehash",
+    "fire",
+    "gitpython",
+    "httpx[socks]",
+    "hydra-core",
+    "ipdb",
+    "jaxtyping",
+    "jsonlines",
+    "jupytext",
+    "langdetect",
+    "liger-kernel; sys_platform == 'linux'",
+    "matplotlib",
+    "mcap==1.5.0",
+    "modal",
+    "multiprocess",
+    "mwparserfromhell",
+    "neptune",
+    "ninja",
+    "oauthlib",
+    "openpyxl",
+    "pandas",
+    "peft",
+    "Pillow",
+    "pyarrow",
+    "pre-commit",
+    "protobuf",
+    "curl-cffi",
+    "pydantic",
+    "pymupdf",
+    "python-dotenv",
+    "pyyaml",
+    "regex",
+    "requests",
+    "requests-oauthlib",
+    "safetensors",
+    "scikit-learn",
+    "sentence-transformers",
+    "sentencepiece",
+    "spacy",
+    "sqlalchemy",
+    "sqlitedict",
+    "tinker",
+    "torchmetrics",
+    "torchdiffeq",
+    "torchcodec==0.17.0",
+    "umap-learn",
+    "uvicorn",
+    "wandb",
+    "wheel",
+    "timm",
+    "beartype",
+    "einops",
+    "opencv-python",
+    "tqdm>=4.70.1",
+    "torchvision>=0.25.0",
+    "seaborn>=0.13.2",
+    "jupyter>=1.1.1",
+    "zarr<3",
+    "imagecodecs-numcodecs",
+    "torchaudio>=2.11.0",
+    "transformers>=5.18.0",
+    "gymnasium>=1.3.0",
+    "vizdoom>=1.3.1",
+    "huggingface-hub[hf-xet]>=1.33.0",
+    "psutil>=7.2.2",
+]
+
+
+[project.scripts]
+project = "architecture.main:main"
+
+[build-system]
+requires = ["setuptools", "wheel"]
+build-backend = "setuptools.build_meta"
+[project.optional-dependencies]
+ampere = [
+    "torch",
+    "torchvision",
+    "torchaudio",
+    "transformers",
+    "bitsandbytes",
+    "accelerate",
+    "flash-attn; sys_platform == 'linux'",
+    "flash-linear-attention",
+    "causal-conv1d",
+    "mamba-ssm",
+    "flashinfer-python; sys_platform == 'linux'",
+    "flashinfer-cubin; sys_platform == 'linux'",
+    "flashinfer-jit-cache; sys_platform == 'linux'",
+    "gram-newton-schulz-ampere; sys_platform == 'linux'",
+    "gram-newton-schulz; sys_platform == 'linux'",
+    "kernels",
+    "dion",
+]
+ampere13 = [
+    "torch==2.14.*",
+    "torchvision==0.29.*",
+    "torchaudio",
+    "transformers",
+    "bitsandbytes",
+    "accelerate",
+    "flash-attn; sys_platform == 'linux'",
+    "flash-linear-attention",
+    "causal-conv1d",
+    "mamba-ssm",
+    "flashinfer-python; sys_platform == 'linux'",
+    "flashinfer-cubin; sys_platform == 'linux'",
+    "flashinfer-jit-cache; sys_platform == 'linux'",
+    "gram-newton-schulz-ampere; sys_platform == 'linux'",
+    "gram-newton-schulz; sys_platform == 'linux'",
+    "kernels",
+    "dion",
+]
+hopper = [
+    "torch==2.14.*",
+    "gram-newton-schulz-ampere; sys_platform == 'linux'",
+    "gram-newton-schulz; sys_platform == 'linux'",
+    "torchvision==0.29.*",
+    "torchaudio",
+    "transformers",
+    "accelerate",
+    "flash-attn-4==4.0.0b15; sys_platform == 'linux'",
+    "nvidia-cutlass-dsl==4.5.2; sys_platform == 'linux'",
+    "apache-tvm-ffi==0.1.11; sys_platform == 'linux'",
+    "quack-kernels==0.5.0; sys_platform == 'linux'",
+]
+cpu = [
+    "torch",
+    "gram-newton-schulz-ampere; sys_platform == 'linux'",
+    "gram-newton-schulz; sys_platform == 'linux'",
+    "torchvision",
+    "torchaudio",
+    "transformers",
+]
+
+[tool.uv]
+no-build-isolation-package = ["gram-newton-schulz"]
+constraint-dependencies = [
+    "flashinfer-python==0.6.13",
+    "flashinfer-cubin==0.6.13",
+    "flashinfer-jit-cache==0.6.13",
+]
+conflicts = [
+    [
+        { extra = "cpu" },
+        { extra = "ampere" },
+        { extra = "ampere13" },
+        { extra = "hopper" },
+    ],
+]
+
+[tool.uv.extra-build-dependencies]
+causal-conv1d = [
+    { requirement = "torch", match-runtime = true },
+    "ninja",
+    "numpy",
+    "packaging",
+    "setuptools",
+    "wheel",
+]
+mamba-ssm = [
+    { requirement = "torch", match-runtime = true },
+    "ninja",
+    "numpy",
+    "packaging",
+    "setuptools",
+    "wheel",
+]
+vllm = [
+    { requirement = "torch", match-runtime = true },
+    "ninja",
+    "numpy",
+    "packaging",
+    "setuptools",
+    "wheel",
+]
+
+[tool.black]
+line-length = 120
+target-version = ["py312"]
+
+[tool.ruff]
+line-length = 120
+
+[tool.ruff.lint.isort]
+no-lines-before = ["standard-library", "third-party", "first-party", "local-folder"]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["configs*", "data*", "evals*", "losses*", "models*", "training*", "transport*", "utils*"]
+namespaces = true
+
+[tool.setuptools.package-data]
+configs = ["*.yaml", "**/*.yaml"]
+
+[dependency-groups]
+dev = [
+    "ruff>=0.16.8",
+]
+
+[tool.uv.sources]
+torchcodec = { index = "pytorch-cpu" }
+torch = [
+    { index = "pytorch-cpu", extra = "cpu" },
+    { index = "pytorch-cu129", extra = "ampere", marker = "sys_platform == 'linux'" },
+    { index = "pytorch-cu130", extra = "ampere13", marker = "sys_platform == 'linux'" },
+    { index = "pytorch-cu130", extra = "hopper", marker = "sys_platform == 'linux'" },
+]
+torchvision = [
+    { index = "pytorch-cpu", extra = "cpu" },
+    { index = "pytorch-cu129", extra = "ampere", marker = "sys_platform == 'linux'" },
+    { index = "pytorch-cu130", extra = "ampere13", marker = "sys_platform == 'linux'" },
+    { index = "pytorch-cu130", extra = "hopper", marker = "sys_platform == 'linux'" },
+]
+torchaudio = [
+    { index = "pytorch-cpu", extra = "cpu" },
+    { index = "pytorch-cu129", extra = "ampere", marker = "sys_platform == 'linux'" },
+    { index = "pytorch-cu130", extra = "ampere13", marker = "sys_platform == 'linux'" },
+    { index = "pytorch-cu130", extra = "hopper", marker = "sys_platform == 'linux'" },
+]
+flash-attn = [
+    { index = "astral-cu129", extra = "ampere", marker = "sys_platform == 'linux'" },
+    { index = "astral-cu130", extra = "ampere13", marker = "sys_platform == 'linux'" },
+]
+causal-conv1d = [
+    { index = "astral-cu129", extra = "ampere", marker = "sys_platform == 'linux'" },
+    { index = "astral-cu130", extra = "ampere13", marker = "sys_platform == 'linux'" },
+]
+mamba-ssm = [
+    { index = "astral-cu129", extra = "ampere", marker = "sys_platform == 'linux'" },
+    { index = "astral-cu130", extra = "ampere13", marker = "sys_platform == 'linux'" },
+]
+flashinfer-jit-cache = [
+    { index = "flashinfer-cu129", extra = "ampere", marker = "sys_platform == 'linux'" },
+    { index = "flashinfer-cu130", extra = "ampere13", marker = "sys_platform == 'linux'" },
+]
+gram-newton-schulz-ampere = { git = "https://github.com/afrenkai/Gram-Newton-Schulz-Ampere.git" }
+dion = { git = "https://github.com/microsoft/dion.git", rev = "71dc64f9fde8c3ee8643431390a16698bf32396f" }
+
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
+
+[[tool.uv.index]]
+name = "pytorch-cu129"
+url = "https://download.pytorch.org/whl/cu129"
+explicit = true
+
+[[tool.uv.index]]
+name = "pytorch-cu130"
+url = "https://download.pytorch.org/whl/cu130"
+explicit = true
+
+[[tool.uv.index]]
+name = "astral-cu129"
+url = "https://wheels.astral.sh/simple/cu129"
+explicit = true
+
+[[tool.uv.index]]
+name = "astral-cu130"
+url = "https://wheels.astral.sh/simple/cu130"
+explicit = true
+
+[[tool.uv.index]]
+name = "flashinfer-cu129"
+url = "https://flashinfer.ai/whl/cu129"
+explicit = true
+
+[[tool.uv.index]]
+name = "flashinfer-cu130"
+url = "https://flashinfer.ai/whl/cu130"
+explicit = true
