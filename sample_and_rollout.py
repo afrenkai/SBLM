@@ -3,14 +3,15 @@ import math
 import os
 import numpy as np
 import torch
+import torch._dynamo.config as dynamo_config
 import torch.distributed as dist
 import torch.nn.functional as F
 from tqdm import tqdm
-from model import DDTConfig, BrownianDDT
+from model import BrownianDDT, DDTConfig
+from prep_batch import build_document_mask
 
 
 def noise_from_seeds(seeds: np.ndarray, seq_len: int, d_model: int, device: torch.device) -> torch.Tensor:
-    """Deterministically reconstructs X_0 ~ N(0, I) of shape (B, L, D) from uint64 seeds."""
     B = len(seeds)
     out = torch.empty((B, seq_len, d_model), device=device, dtype=torch.float32)
     gen = torch.Generator(device=device)
@@ -31,19 +32,21 @@ def sample_brownian_bridge(
     prefix_ids: torch.Tensor | None = None,
     x_0: torch.Tensor | None = None,
 ) -> torch.Tensor:
-    """
-    Exact-Bridge Euler sampler with DDT Condition Encoder caching.
-    """
+    assert steps > 0 and cache_interval > 0
     E_weight = model.tok_emb.weight
     device = E_weight.device
     D = E_weight.shape[1]
 
     X = torch.randn((B, L, D), device=device, dtype=torch.float32) if x_0 is None else x_0.float().clone()
     rope_pos = torch.arange(L, device=device, dtype=torch.int32).unsqueeze(0).expand(B, L)
+    block_mask = None
 
     if prefix_ids is not None:
         P = prefix_ids.shape[1]
         prefix_emb = F.embedding(prefix_ids, E_weight).float()
+        assert prefix_ids.shape[0] == B and P <= L
+        is_prefix = torch.arange(L, device=device).unsqueeze(0).expand(B, L) < P
+        block_mask = build_document_mask(torch.zeros((B, L), device=device, dtype=torch.int32), is_prefix)
 
     z_cache = None
     for k in range(steps):
@@ -53,15 +56,16 @@ def sample_brownian_bridge(
         if prefix_ids is not None:
             X[:, :P] = prefix_emb
 
-        tau_tensor = torch.full((B, L), t, device=device, dtype=torch.bfloat16)
+        tau_tensor = torch.full((B, L), t, device=device, dtype=torch.float32)
         if prefix_ids is not None:
             tau_tensor[:, :P] = 1.0
 
-        x_in = X.to(torch.bfloat16)
-        if (k % cache_interval == 0) or (z_cache is None):
-            z_cache = model.encode(x_in, tau_tensor, rope_pos, block_mask=None)
+        x_in = X.to(E_weight.dtype)
+        with torch.autocast(device_type=device.type, dtype=torch.bfloat16, enabled=device.type == "cuda"):
+            if (k % cache_interval == 0) or (z_cache is None):
+                z_cache = model.encode(x_in, tau_tensor, rope_pos, block_mask)
 
-        logits = model.decode(x_in, tau_tensor, z_cache, rope_pos, block_mask=None)
+            logits = model.decode(x_in, tau_tensor, z_cache, rope_pos, block_mask)
 
         if k == steps - 1:
             tokens = logits.argmax(dim=-1)
@@ -69,7 +73,6 @@ def sample_brownian_bridge(
                 tokens[:, :P] = prefix_ids
             return tokens
 
-        # Clamped endpoint on vocabulary convex hull -> exact conditional bridge transition
         x_hat = torch.softmax(logits.float(), dim=-1) @ E_weight.float()
         alpha = (s - t) / (1.0 - t)
         noise_scale = sigma * math.sqrt((s - t) * (1.0 - s) / (1.0 - t))
@@ -77,19 +80,22 @@ def sample_brownian_bridge(
 
 
 def generate_imf_rollouts(args):
-    dist.init_process_group("nccl")
-    rank = dist.get_rank()
-    world_size = dist.get_world_size()
     local_rank = int(os.environ["LOCAL_RANK"])
     device = torch.device(f"cuda:{local_rank}")
     torch.cuda.set_device(device)
+    dist.init_process_group("nccl", device_id=device)
+    rank = dist.get_rank()
+    world_size = dist.get_world_size()
+    torch.set_float32_matmul_precision("high")
+    dynamo_config.recompile_limit = max(128, dynamo_config.recompile_limit)
 
-    ckpt = torch.load(args.ckpt, map_location=device, weights_only=False)
-    model = BrownianDDT(DDTConfig()).to(device=device, dtype=torch.bfloat16)
+    ckpt = torch.load(args.ckpt, map_location="cpu", weights_only=False)
+    cfg = DDTConfig(**ckpt["model_config"]) if "model_config" in ckpt else DDTConfig()
+    model = BrownianDDT(cfg).to(device=device)
     model.load_state_dict(ckpt["model"])
     model.eval()
 
-    per_rank_seqs = args.num_seqs // world_size
+    per_rank_seqs = args.num_seqs // world_size + int(rank < args.num_seqs % world_size)
     rng = np.random.default_rng(seed=42 + rank)
     all_seeds = rng.integers(0, 2**62, size=(per_rank_seqs,), dtype=np.uint64)
     all_tokens = np.empty((per_rank_seqs, args.seq_len), dtype=np.uint16)

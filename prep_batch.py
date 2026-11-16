@@ -1,44 +1,58 @@
 import torch
-from torch.nn.attention.flex_attention import create_block_mask
+from torch.nn.attention.flex_attention import BlockMask, create_block_mask
+
+
+def build_document_mask(doc_ids: torch.Tensor, is_prefix: torch.Tensor) -> BlockMask:
+    batch_size, sequence_length = doc_ids.shape
+
+    def mask_mod(
+        batch_index: torch.Tensor,
+        head_index: torch.Tensor,
+        query_index: torch.Tensor,
+        key_index: torch.Tensor,
+    ) -> torch.Tensor:
+        bounded_query = query_index.clamp(max=sequence_length - 1)
+        bounded_key = key_index.clamp(max=sequence_length - 1)
+        same_document = doc_ids[batch_index, bounded_query] == doc_ids[batch_index, bounded_key]
+        prefix_query = is_prefix[batch_index, bounded_query]
+        prefix_key = is_prefix[batch_index, bounded_key]
+        return (
+            (query_index < sequence_length)
+            & (key_index < sequence_length)
+            & same_document
+            & (~prefix_query | (prefix_key & (key_index <= query_index)))
+        )
+
+    return create_block_mask(
+        mask_mod,
+        B=batch_size,
+        H=None,
+        Q_LEN=sequence_length,
+        KV_LEN=sequence_length,
+        device=doc_ids.device,
+        _compile=True,
+    )
 
 
 @torch.no_grad()
 def prepare_diffusion_batch(
-    input_ids: torch.Tensor,   # (B, L) int64 on CUDA
+    input_ids: torch.Tensor,  # (B, L) int64 on CUDA
     cu_seqlens: torch.Tensor,  # (num_docs + 1,) int32 on CUDA
     prefix_prob: float = 0.30,
+    logit_norm_mean: float = 0.0,
 ):
     B, L = input_ids.shape
     device = input_ids.device
 
-    # 1. Document IDs & per-document RoPE positions
     positions = torch.arange(B * L, device=device, dtype=torch.int32)
     doc_ids = torch.bucketize(positions, cu_seqlens[1:-1], right=True)
     rope_pos = (positions - cu_seqlens[doc_ids]).view(B, L)
 
-    # 2. FlexAttention bidirectional document BlockMask
-    doc_ids_2d = doc_ids.view(B, L)
-
-    def doc_mask_mod(b, h, q_idx, kv_idx):
-        return doc_ids_2d[b, q_idx] == doc_ids_2d[b, kv_idx]
-
-    block_mask = create_block_mask(
-        doc_mask_mod,
-        B=B,
-        H=None,
-        Q_LEN=L,
-        KV_LEN=L,
-        device=device,
-        _compile=True,
-    )
-
-    # 3. Per-document logit-normal timesteps: tau_d = sigmoid(N(0, 1))
     doc_lengths = cu_seqlens[1:] - cu_seqlens[:-1]  # (num_docs,)
     num_docs = doc_lengths.shape[0]
-    tau_docs = torch.sigmoid(torch.randn(num_docs, device=device))
+    tau_docs = torch.sigmoid(torch.randn(num_docs, device=device) + logit_norm_mean)
     tau = tau_docs[doc_ids].view(B, L)
 
-    # 4. Vectorized prefix-inpainting mask (30% of docs with length >= 2)
     has_prefix = (torch.rand(num_docs, device=device) < prefix_prob) & (doc_lengths >= 2)
     max_prefix = torch.clamp(doc_lengths // 2, min=1)
     prefix_len_docs = (torch.rand(num_docs, device=device) * max_prefix).long() + 1
@@ -47,5 +61,6 @@ def prepare_diffusion_batch(
     is_prefix = rope_pos < prefix_len_docs[doc_ids].view(B, L)
     tau = torch.where(is_prefix, torch.ones_like(tau), tau)
     labels = torch.where(is_prefix, torch.full_like(input_ids, -100), input_ids)
+    block_mask = build_document_mask(doc_ids.view(B, L), is_prefix)
 
     return labels, tau, rope_pos, block_mask

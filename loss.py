@@ -1,7 +1,8 @@
 import numpy as np
 import torch
-import torch.nn as nn
 import torch.nn.functional as F
+from liger_kernel.transformers.cross_entropy import LigerCrossEntropyLoss
+from torch import nn
 from torch.nn.attention.flex_attention import BlockMask
 
 
@@ -10,6 +11,7 @@ class SIGRegLoss(nn.Module):
     Sliced Isotropic Gaussian Regularization (Epps-Pulley 1D characteristic function test).
     Forces the embedding distribution toward N(0, I_d) across random 1D projections.
     """
+
     def __init__(
         self,
         d_model: int,
@@ -27,12 +29,12 @@ class SIGRegLoss(nn.Module):
         nodes, weights = np.polynomial.legendre.leggauss(num_quad_points)
         half_span = 0.5 * (omega_max - omega_min)
         mid = 0.5 * (omega_max + omega_min)
-        omegas = torch.tensor(mid + half_span * nodes, dtype=torch.float32)          # (K,)
-        quad_weights = torch.tensor(half_span * weights, dtype=torch.float32)       # (K,)
+        omegas = torch.tensor(mid + half_span * nodes, dtype=torch.float32)  # (K,)
+        quad_weights = torch.tensor(half_span * weights, dtype=torch.float32)  # (K,)
 
         # Analytic N(0, 1) characteristic function & Gaussian integration kernel e^(-w^2 / 2)
-        target_cf = torch.exp(-0.5 * omegas.pow(2))                                 # (K,)
-        weighted_quad = quad_weights * target_cf                                    # (K,)
+        target_cf = torch.exp(-0.5 * omegas.pow(2))  # (K,)
+        weighted_quad = quad_weights * target_cf  # (K,)
 
         self.register_buffer("omegas", omegas, persistent=False)
         self.register_buffer("target_cf", target_cf, persistent=False)
@@ -86,6 +88,7 @@ class BrownianBridgeCriterion(nn.Module):
         self.w_cons = w_cons
         self.cons_interval = cons_interval
         self.cons_delta = cons_delta
+        self.decoder_ce = LigerCrossEntropyLoss(ignore_index=-100)
         self.sigreg = None  # Lazily initialized with d_model on first call
 
     def sample_bridge(
@@ -96,7 +99,7 @@ class BrownianBridgeCriterion(nn.Module):
         eps: torch.Tensor,
         out_dtype: torch.dtype,
     ) -> torch.Tensor:
-        """Closed-form Brownian bridge marginal: X_t = (1-t)X_0 + t X_T + sigma * sqrt(t(1-t)) * eps."""
+        "X_t = (1-t)X_0 + t X_T + sigma * sqrt(t(1-t)) * eps."
         t = tau.float().unsqueeze(-1)
         std = self.sigma * torch.sqrt(torch.clamp(t * (1.0 - t), min=0.0))
         x_t = (1.0 - t) * x_0 + t * x_T + std * eps
@@ -105,58 +108,55 @@ class BrownianBridgeCriterion(nn.Module):
     def forward(
         self,
         model: nn.Module,
-        raw_model: nn.Module,  # Unwrapped BrownianDDT (in case model is DDP/compiled)
+        raw_model: nn.Module,  # de-compile
         input_ids: torch.Tensor,
         labels: torch.Tensor,
         tau: torch.Tensor,
         rope_pos: torch.Tensor,
         block_mask: BlockMask,
         step: int,
-        x_0_override: torch.Tensor | None = None,  # Used in Stage 2 (k=1) for coupled IMF pairs
-    ) -> tuple[torch.Tensor, dict[str, float]]:
+        x_0_override: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
         E_weight = raw_model.tok_emb.weight
         D = E_weight.shape[1]
         if self.sigreg is None:
             self.sigreg = SIGRegLoss(d_model=D).to(E_weight.device)
 
-        # 1. Construct Brownian bridge state X_t in float32, cast to model dtype (bfloat16)
+        # brownian bridge has to be full precisin
         x_T = F.embedding(input_ids, E_weight).float()
         x_0 = torch.randn_like(x_T) if x_0_override is None else x_0_override.float()
         eps = torch.randn_like(x_T)
         x_t = self.sample_bridge(x_0, x_T, tau, eps, out_dtype=E_weight.dtype)
 
-        # 2. Forward pass through Encoder + DDT Decoder
-        logits, z_t, enc_ce_loss = model(x_t, tau, rope_pos, block_mask, labels)
+        with torch.autocast(device_type=x_t.device.type, dtype=torch.bfloat16, enabled=x_t.is_cuda):
+            logits, z_t, enc_ce_loss = model(x_t, tau, rope_pos, block_mask, labels)
 
-        # 3. Main Decoder Cross-Entropy
-        ce_loss = F.cross_entropy(
-            logits.view(-1, logits.size(-1)),
-            labels.view(-1),
-            ignore_index=-100,
+        ce_loss = self.decoder_ce(
+            logits.reshape(-1, logits.size(-1)).clone(),
+            labels.reshape(-1),
         )
 
-        # 4. Singularity-Free Velocity Direction Loss: 1 - cos(x_hat - X_t, X_T - X_t)
         valid_mask = labels != -100
         probs = torch.softmax(logits.float(), dim=-1)
-        x_hat = probs @ E_weight.float()  # Clamped embedding on vocabulary convex hull
+        x_hat = probs @ E_weight.float()
         x_t_f32 = x_t.float()
 
         pred_vec = x_hat[valid_mask] - x_t_f32[valid_mask]
         target_vec = x_T[valid_mask] - x_t_f32[valid_mask]
         dir_loss = (1.0 - F.cosine_similarity(pred_vec, target_vec, dim=-1, eps=1e-6)).mean()
 
-        # 5. SIGReg on target embeddings + random vocabulary subset
         sigreg_loss = self.sigreg(x_T.view(-1, D), E_weight)
 
-        # 6. Adjacent-Step Encoder Consistency (runs every `cons_interval` steps to reuse block_mask)
         if self.w_cons > 0.0 and (step % self.cons_interval == 0):
             delta = torch.empty_like(tau).uniform_(-self.cons_delta, self.cons_delta)
             tau_prime = torch.clamp(tau + delta, 0.0, 1.0)
-            # Keep clean prefix tokens pinned at tau = 1.0
             tau_prime = torch.where(tau >= 1.0, torch.ones_like(tau_prime), tau_prime)
 
             x_t_prime = self.sample_bridge(x_0, x_T, tau_prime, eps, out_dtype=E_weight.dtype)
-            with torch.no_grad():
+            with (
+                torch.no_grad(),
+                torch.autocast(device_type=x_t.device.type, dtype=torch.bfloat16, enabled=x_t.is_cuda),
+            ):
                 z_t_prime = raw_model.encode(x_t_prime, tau_prime, rope_pos, block_mask)
 
             cons_loss = (
@@ -168,23 +168,19 @@ class BrownianBridgeCriterion(nn.Module):
             scaled_cons = cons_loss
 
         total_loss = (
-            ce_loss
-            + self.w_enc_ce * enc_ce_loss
-            + self.w_dir * dir_loss
-            + self.w_sigreg * sigreg_loss
-            + scaled_cons
+            ce_loss + self.w_enc_ce * enc_ce_loss + self.w_dir * dir_loss + self.w_sigreg * sigreg_loss + scaled_cons
         )
 
         with torch.no_grad():
-            emb_std = E_weight.float().std(dim=0).mean().item()
+            emb_std = E_weight.float().std(dim=0).mean()
 
         metrics = {
-            "loss": total_loss.detach().item(),
-            "ce": ce_loss.detach().item(),
-            "enc_ce": enc_ce_loss.detach().item(),
-            "dir": dir_loss.detach().item(),
-            "sigreg": sigreg_loss.detach().item(),
-            "cons": cons_loss.detach().item(),
+            "loss": total_loss.detach(),
+            "ce": ce_loss.detach(),
+            "enc_ce": enc_ce_loss.detach(),
+            "dir": dir_loss.detach(),
+            "sigreg": sigreg_loss.detach(),
+            "cons": cons_loss.detach(),
             "emb_std": emb_std,
         }
         return total_loss, metrics
